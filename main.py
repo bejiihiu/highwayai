@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from racing_ai.agent import ScriptedDemoAgent, ZeroAgent
+from racing_ai.track import Track
 from racing_ai.world import RacingWorld
 
 
@@ -48,6 +49,15 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "cpu", "cuda"],
         help="Device to use for PyTorch (auto, cpu, cuda).",
     )
+    parser.add_argument(
+        "--marker-spacing",
+        type=float,
+        default=Track.DEFAULT_MARKER_SPACING,
+        help=(
+            "Distance between reward markers in world units. "
+            "Lower value means more markers (minimum enforced in world logic)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -76,6 +86,7 @@ def main() -> None:
             raise SystemExit("Missing dependency for training. Run: python -m pip install -r requirements.txt") from exc
 
         config = RLConfig()
+        config.marker_spacing = float(args.marker_spacing)
         train(config, episodes=args.episodes, device=args.device, render=args.train_render, algo=args.algo)
         return
 
@@ -106,7 +117,10 @@ def main() -> None:
     else:
         agent = ScriptedDemoAgent() if args.demo_agent else ZeroAgent()
 
-    world = RacingWorld(agent=agent)
+    world = RacingWorld(
+        agent=agent,
+        marker_spacing=float(args.marker_spacing),
+    )
 
     try:
         from racing_ai.renderer import run_pyglet_app

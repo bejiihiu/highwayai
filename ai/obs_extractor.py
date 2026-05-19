@@ -11,17 +11,41 @@ from racing_ai.agent import Observation
 class ObsExtractor:
     """Converts world observation dictionary into a flat vector."""
 
-    output_dim: int = 60
+    RAY_COUNT: int = 21
+    output_dim: int = 136
 
     def __call__(self, obs: Observation) -> np.ndarray:
         vec: list[float] = []
 
         rays = obs.get("rays", [])
-        for i in range(11):
+        ray_distances: list[float] = []
+        for i in range(self.RAY_COUNT):
             if i < len(rays):
-                vec.append(float(rays[i]["normalized_distance"]))
+                ray = rays[i]
+                normalized = float(ray.get("normalized_distance", 1.0))
+                normalized = max(0.0, min(1.0, normalized))
+                angle = float(ray.get("relative_angle", 0.0))
+                ray_distances.append(normalized)
+                vec.append(normalized)
+                # Hit point projection in the car-local frame (distance-normalized).
+                vec.append(math.cos(angle) * normalized)
+                vec.append(math.sin(angle) * normalized)
             else:
-                vec.append(1.0)
+                ray_distances.append(1.0)
+                vec.extend([1.0, 0.0, 0.0])
+
+        # Spatial edge profile: local depth changes between neighbouring rays.
+        for i in range(len(ray_distances) - 1):
+            vec.append(ray_distances[i + 1] - ray_distances[i])
+
+        center_idx = self.RAY_COUNT // 2
+        front = ray_distances[max(0, center_idx - 2):min(self.RAY_COUNT, center_idx + 3)]
+        right = ray_distances[:max(0, center_idx - 2)]
+        left = ray_distances[min(self.RAY_COUNT, center_idx + 3):]
+        vec.append(min(front) if front else 1.0)
+        vec.append(float(sum(front) / len(front)) if front else 1.0)
+        vec.append(min(left) if left else 1.0)
+        vec.append(min(right) if right else 1.0)
 
         vec.append(float(obs.get("forward_speed", 0.0)) / 120.0)
         vec.append(float(obs.get("lateral_speed", 0.0)) / 80.0)

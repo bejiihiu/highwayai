@@ -36,7 +36,7 @@ class SACHyperParams:
 @dataclass(slots=True)
 class RLConfig:
     # Observation / action dimensions
-    state_dim: int = 60
+    state_dim: int = 136
     continuous_action_dim: int = 5  # throttle, steer, brake, clutch, handbrake
     gear_action_dim: int = 3        # down, hold, up
 
@@ -49,6 +49,8 @@ class RLConfig:
     save_every_episodes: int = 50
     checkpoint_dir: str = "ai/checkpoints"
     log_every_steps: int = 180
+    marker_spacing: float = 100.0
+    normalize_marker_reward: bool = True
 
     ppo: PPOHyperParams = field(default_factory=PPOHyperParams)
     sac: SACHyperParams = field(default_factory=SACHyperParams)

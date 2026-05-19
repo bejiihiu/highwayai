@@ -135,7 +135,10 @@ def train(
         raise ValueError(f"Unsupported algorithm '{algo}'. Use 'ppo' or 'sac'.")
 
     os.makedirs(config.checkpoint_dir, exist_ok=True)
-    world = RacingWorld()
+    world = RacingWorld(
+        marker_spacing=config.marker_spacing,
+        normalize_marker_reward=config.normalize_marker_reward,
+    )
     reward_shaper = RewardShaper(config.reward_clip)
 
     if algo == "ppo":

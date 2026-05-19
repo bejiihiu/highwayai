@@ -33,10 +33,19 @@ class RewardShaper:
 
         speed = float(next_obs.get("speed", 0.0))
         forward_speed = float(next_obs.get("forward_speed", 0.0))
+        prev_forward_speed = float(prev_obs.get("forward_speed", 0.0))
+        prev_speed = float(prev_obs.get("speed", 0.0))
         drift_intensity = float(next_obs.get("drift_intensity", 0.0))
+        prev_drift_intensity = float(prev_obs.get("drift_intensity", 0.0))
         off_track = bool(next_obs.get("off_track", False))
         heading_error = float(next_obs.get("heading_error", 0.0))
         stalled = bool(next_obs.get("stalled", False))
+        lateral_g = abs(float(next_obs.get("lateral_g", 0.0)))
+        traction = float(next_obs.get("traction", 0.0))
+        wheel_spin_rear = float(next_obs.get("wheel_spin_rear", 0.0))
+        time_prev = float(prev_obs.get("time", 0.0))
+        time_next = float(next_obs.get("time", 0.0))
+        dt = max(1e-3, time_next - time_prev)
 
         steer = float(action.get("steer", 0.0))
         brake = float(action.get("brake", 0.0))
@@ -46,6 +55,43 @@ class RewardShaper:
         # Driving quality bonuses
         if not off_track and not stalled:
             add("speed_bonus", 0.22 * (speed / 90.0))
+
+        # Encourage active acceleration while preserving traction.
+        forward_accel = (forward_speed - prev_forward_speed) / dt
+        if not off_track and throttle > 0.18 and forward_accel > 0.0:
+            accel_score = min(forward_accel / 145.0, 1.0)
+            add("acceleration_bonus", 0.14 * accel_score)
+
+        # Extra launch credit so the agent gets out of slow zones faster.
+        if not off_track and speed < 18.0 and prev_speed < speed and throttle > 0.45:
+            add("launch_accel_bonus", 0.05)
+
+        # Reward clean, stable high-speed driving on the racing line.
+        if not off_track and speed > 62.0 and abs(heading_error) < 0.28 and drift_intensity < 0.45:
+            add("high_speed_stability_bonus", 0.09)
+
+        # Reward carrying speed in cornering load when the car stays controlled.
+        if not off_track and lateral_g > 0.58 and speed > 30.0 and abs(heading_error) < 0.58:
+            add("cornering_speed_bonus", 0.075)
+
+        # Reward entering a drift and holding it in a controllable range.
+        if (
+            not off_track
+            and prev_drift_intensity < 0.34
+            and drift_intensity >= 0.44
+            and speed > 28.0
+            and abs(heading_error) < 0.9
+        ):
+            add("drift_entry_bonus", 0.24)
+
+        if not off_track and 0.35 <= drift_intensity <= 0.82 and speed > 24.0 and abs(heading_error) < 1.05:
+            add("controlled_drift_bonus", 0.085 * drift_intensity)
+
+        # Penalize unstable wheelspin/spinouts that do not contribute to forward pace.
+        if throttle > 0.6 and traction < 0.24 and wheel_spin_rear > 0.52:
+            add("traction_loss_penalty", -0.11)
+        if drift_intensity > 0.93 and speed < 20.0:
+            add("spinout_penalty", -0.14)
 
         prev_progress = float(prev_obs.get("progress", 0.0))
         progress = float(next_obs.get("progress", 0.0))

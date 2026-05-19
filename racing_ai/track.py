@@ -108,6 +108,10 @@ class _SegmentGrid:
 
 
 class Track:
+    DEFAULT_MARKER_SPACING = 100.0
+    LEGACY_MARKER_SPACING = 150.0
+    MIN_MARKER_SPACING = 45.0
+
     def __init__(
         self,
         centerline: list[Point],
@@ -208,10 +212,15 @@ class Track:
     def start_line(self) -> tuple[Point, Point]:
         return self.inner_boundary[0], self.outer_boundary[0]
 
-    def reward_markers(self) -> list[RewardMarker]:
+    def reward_markers(
+        self,
+        marker_spacing: float = DEFAULT_MARKER_SPACING,
+        normalize_total_reward: bool = True,
+    ) -> list[RewardMarker]:
         markers: list[RewardMarker] = []
-        marker_spacing = 150.0
-        marker_count = max(1, int(self.length // marker_spacing))
+        spacing = max(self.MIN_MARKER_SPACING, float(marker_spacing))
+        marker_count = max(1, int(self.length // spacing))
+        reward_scale = spacing / self.LEGACY_MARKER_SPACING if normalize_total_reward else 1.0
         
         reward_map = {
             "apex": 4.0,
@@ -233,7 +242,7 @@ class Track:
             marker_distance = (marker_id + 0.5) * self.length / marker_count
             position, segment_index = self._point_at_distance(marker_distance)
             kind = self._marker_kind(segment_index, marker_id)
-            reward = reward_map.get(kind, 3.0)
+            reward = reward_map.get(kind, 3.0) * reward_scale
             markers.append(
                 RewardMarker(
                     marker_id=marker_id,

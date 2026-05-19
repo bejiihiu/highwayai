@@ -37,19 +37,32 @@ class WorldStats:
 
 class RacingWorld:
     DEATH_PENALTY: float = 50.0
+    DEFAULT_MAX_RAY_DISTANCE: float = 360.0
+    DEFAULT_RAY_ANGLES_DEG: tuple[float, ...] = (
+        -155.0, -135.0, -115.0, -95.0, -75.0, -58.0, -42.0, -28.0, -16.0, -8.0,
+        0.0,
+        8.0, 16.0, 28.0, 42.0, 58.0, 75.0, 95.0, 115.0, 135.0, 155.0,
+    )
 
-    def __init__(self, agent: Agent | None = None) -> None:
+    def __init__(
+        self,
+        agent: Agent | None = None,
+        marker_spacing: float = Track.DEFAULT_MARKER_SPACING,
+        normalize_marker_reward: bool = True,
+    ) -> None:
         self.track = Track.build_default()
         spawn_position, spawn_heading = self.track.spawn_pose()
         self.car = Car(spawn_position, spawn_heading)
-        self.markers = self.track.reward_markers()
+        self.marker_spacing = max(Track.MIN_MARKER_SPACING, float(marker_spacing))
+        self.normalize_marker_reward = bool(normalize_marker_reward)
+        self.markers = self.track.reward_markers(
+            marker_spacing=self.marker_spacing,
+            normalize_total_reward=self.normalize_marker_reward,
+        )
         self.agent = agent or ZeroAgent()
         self.stats = WorldStats()
-        self.max_ray_distance = 280.0
-        self.ray_angles = [
-            math.radians(angle)
-            for angle in (-135, -95, -65, -35, -15, 0, 15, 35, 65, 95, 135)
-        ]
+        self.max_ray_distance = self.DEFAULT_MAX_RAY_DISTANCE
+        self.ray_angles = [math.radians(angle) for angle in self.DEFAULT_RAY_ANGLES_DEG]
         self.previous_off_track = False
         self.previous_edge_collision = False
         self.edge_collision = False
@@ -241,6 +254,8 @@ class RacingWorld:
             "total_markers_collected": self.stats.total_markers_collected,
             "markers_total": len(self.markers),
             "marker_reward": self.stats.marker_reward,
+            "marker_spacing": self.marker_spacing,
+            "normalize_marker_reward": self.normalize_marker_reward,
             "rays": rays,
             "nearest_markers": nearest_markers,
             "car_position": self.car.position,
