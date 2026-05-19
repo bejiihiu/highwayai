@@ -4,9 +4,69 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from ai.action_space import HybridActionController
+from ai.config import RLConfig
 from ai.reward_shaper import RewardShaper
 from racing_ai.math2d import angle_to_vector
 from racing_ai.world import RacingWorld
+
+
+class ActionMaskAssistTest(unittest.TestCase):
+    def test_shift_assist_forces_upshift_with_clutch(self) -> None:
+        controller = HybridActionController(RLConfig())
+        obs = {
+            "forward_speed": 14.0,
+            "gear": 2,
+            "shift_lockout": 0.0,
+            "stalled": False,
+            "off_track": False,
+            "rpm": 6700.0,
+        }
+        action = {
+            "throttle": 0.75,
+            "steer": 0.0,
+            "brake": 0.0,
+            "clutch": 0.1,
+            "handbrake": 0.0,
+            "gear_intent": 1.0,
+            "gear_up": 0.0,
+            "gear_down": 0.0,
+        }
+
+        masked = controller.apply_mask(obs, action)
+
+        self.assertEqual(int(masked.action["gear_intent"]), 2)
+        self.assertEqual(masked.action["gear_up"], 1.0)
+        self.assertGreaterEqual(masked.action["clutch"], 0.72)
+        self.assertIn("assist_upshift", masked.reasons)
+
+    def test_shift_assist_forces_downshift_with_clutch(self) -> None:
+        controller = HybridActionController(RLConfig())
+        obs = {
+            "forward_speed": 12.0,
+            "gear": 4,
+            "shift_lockout": 0.0,
+            "stalled": False,
+            "off_track": False,
+            "rpm": 1400.0,
+        }
+        action = {
+            "throttle": 0.35,
+            "steer": 0.0,
+            "brake": 0.0,
+            "clutch": 0.15,
+            "handbrake": 0.0,
+            "gear_intent": 1.0,
+            "gear_up": 0.0,
+            "gear_down": 0.0,
+        }
+
+        masked = controller.apply_mask(obs, action)
+
+        self.assertEqual(int(masked.action["gear_intent"]), 0)
+        self.assertEqual(masked.action["gear_down"], 1.0)
+        self.assertGreaterEqual(masked.action["clutch"], 0.72)
+        self.assertIn("assist_downshift", masked.reasons)
 
 
 class GearboxPhysicsTest(unittest.TestCase):

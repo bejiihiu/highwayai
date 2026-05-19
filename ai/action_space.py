@@ -20,6 +20,11 @@ class ActionMaskResult:
 
 class HybridActionController:
     """Maps policy outputs into env actions and applies safety/realism masks."""
+    UPSHIFT_ASSIST_MIN_RPM = 6100.0
+    UPSHIFT_ASSIST_MIN_SPEED = 8.0
+    DOWNSHIFT_ASSIST_MAX_RPM = 1600.0
+    DOWNSHIFT_ASSIST_MIN_SPEED = 6.0
+    SHIFT_ASSIST_MIN_CLUTCH = 0.72
 
     def __init__(self, config: RLConfig) -> None:
         self.config = config
@@ -54,6 +59,8 @@ class HybridActionController:
         gear = int(obs.get("gear", 1))
         shift_lockout = float(obs.get("shift_lockout", 0.0))
         stalled = bool(obs.get("stalled", False))
+        off_track = bool(obs.get("off_track", False))
+        rpm = float(obs.get("rpm", 0.0))
         throttle = float(masked.get("throttle", 0.0))
         brake = float(masked.get("brake", 0.0))
         clutch = float(masked.get("clutch", 0.0))
@@ -119,9 +126,36 @@ class HybridActionController:
         # Recover from accidental neutral at near standstill.
         if speed < 0.8 and gear == 0:
             gear_intent = 2
-            if float(masked.get("clutch", 0.0)) < 0.72:
-                masked["clutch"] = 0.72
+            if float(masked.get("clutch", 0.0)) < self.SHIFT_ASSIST_MIN_CLUTCH:
+                masked["clutch"] = self.SHIFT_ASSIST_MIN_CLUTCH
             reasons.append("launch_shift_from_neutral")
+
+        # Shift assist for early training: helps policy escape first-gear lock.
+        # Only engages while policy is "holding gear" and no lockout is active.
+        if not stalled and shift_lockout <= 0.0 and gear_intent == 1 and not off_track:
+            if (
+                gear >= 1
+                and gear < 5
+                and speed >= self.UPSHIFT_ASSIST_MIN_SPEED
+                and rpm >= self.UPSHIFT_ASSIST_MIN_RPM
+                and throttle > 0.22
+                and brake < 0.2
+            ):
+                gear_intent = 2
+                if float(masked.get("clutch", 0.0)) < self.SHIFT_ASSIST_MIN_CLUTCH:
+                    masked["clutch"] = self.SHIFT_ASSIST_MIN_CLUTCH
+                reasons.append("assist_upshift")
+            elif (
+                gear > 1
+                and speed >= self.DOWNSHIFT_ASSIST_MIN_SPEED
+                and rpm <= self.DOWNSHIFT_ASSIST_MAX_RPM
+                and throttle > 0.12
+                and brake < 0.35
+            ):
+                gear_intent = 0
+                if float(masked.get("clutch", 0.0)) < self.SHIFT_ASSIST_MIN_CLUTCH:
+                    masked["clutch"] = self.SHIFT_ASSIST_MIN_CLUTCH
+                reasons.append("assist_downshift")
 
         masked["gear_intent"] = float(gear_intent)
         masked["gear_up"] = 1.0 if gear_intent == 2 else 0.0
