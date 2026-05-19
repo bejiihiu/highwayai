@@ -21,6 +21,28 @@ CAMERA_ZOOM_STEP = 1.12
 CAMERA_MIN_ZOOM = 0.45
 CAMERA_MAX_ZOOM = 2.65
 
+# Draw-order groups for the dynamic world-space batch.
+_GRP_MARKER_HALO = pyglet.graphics.Group(order=0)
+_GRP_MARKER_BODY = pyglet.graphics.Group(order=1)
+_GRP_MARKER_RING = pyglet.graphics.Group(order=2)
+_GRP_RAY = pyglet.graphics.Group(order=3)
+_GRP_RAY_DOT = pyglet.graphics.Group(order=4)
+_GRP_CAR_WARN = pyglet.graphics.Group(order=5)
+_GRP_CAR_BODY = pyglet.graphics.Group(order=6)
+_GRP_CAR_HEAD = pyglet.graphics.Group(order=7)
+_GRP_CAR_VEL = pyglet.graphics.Group(order=8)
+
+# Groups for the screen-space overlay batch.
+_GRP_OVL_BG = pyglet.graphics.Group(order=0)
+_GRP_OVL_ACCENT = pyglet.graphics.Group(order=1)
+_GRP_OVL_TEXT = pyglet.graphics.Group(order=2)
+
+_MARKER_COLORS = {
+    "apex": (83, 178, 121),
+    "speed": (68, 150, 220),
+    "drift": (222, 156, 65),
+}
+
 
 class RacingWindow(pyglet.window.Window):
     def __init__(self, world: RacingWorld, visible: bool = True) -> None:
@@ -40,10 +62,27 @@ class RacingWindow(pyglet.window.Window):
         self.camera_offset = (0.0, 0.0)
         self.camera_position = self.world.car.position
         self.camera_zoom = 1.0
+
+        # Static batch for the track (drawn once, never changed).
         self.static_batch = pyglet.graphics.Batch()
         self.static_shapes: list[object] = []
         self._build_static_track()
+
+        # Dynamic batch for world-space objects that change every frame.
+        self.dynamic_batch = pyglet.graphics.Batch()
+        self._build_marker_shapes()
+        self._build_ray_shapes()
+        self._build_car_shapes()
+
+        # Overlay batch for screen-space HUD (identity view).
+        self.overlay_batch = pyglet.graphics.Batch()
+        self._build_overlay_shapes()
+
         pyglet.clock.schedule_interval(self.update, 1.0 / 60.0)
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
 
     def update(self, dt: float) -> None:
         self.world.update(dt)
@@ -57,14 +96,20 @@ class RacingWindow(pyglet.window.Window):
             1.0,
         )
         self.clear()
+
         self.view = self._camera_view()
         self.static_batch.draw()
-        self._draw_markers()
-        self._draw_rays()
-        self._draw_car()
+        self._sync_dynamic_shapes()
+        self.dynamic_batch.draw()
+
         self.view = Mat4()
-        self._draw_overlay()
+        self._sync_overlay()
+        self.overlay_batch.draw()
         self.fps_display.draw()
+
+    # ------------------------------------------------------------------
+    # Input handlers
+    # ------------------------------------------------------------------
 
     def on_mouse_motion(self, x: int, y: int, dx: int, dy: int) -> None:
         self.mouse_position = (float(x), float(y))
@@ -115,6 +160,10 @@ class RacingWindow(pyglet.window.Window):
     def capture_frame_image(self) -> pyglet.image.ImageData:
         """Return the current color buffer for agents that want pixel observations."""
         return pyglet.image.get_buffer_manager().get_color_buffer().get_image_data()
+
+    # ------------------------------------------------------------------
+    # One-time static track build (unchanged logic)
+    # ------------------------------------------------------------------
 
     def _build_static_track(self) -> None:
         shoulder_color = (12, 44, 67)
@@ -171,6 +220,207 @@ class RacingWindow(pyglet.window.Window):
                 batch=self.static_batch,
             )
         )
+
+    # ------------------------------------------------------------------
+    # One-time creation of dynamic shapes (reused every frame)
+    # ------------------------------------------------------------------
+
+    def _build_marker_shapes(self) -> None:
+        """Pre-create halo / body / ring shapes for every marker (positions are static)."""
+        self._marker_halos: list[shapes.Circle] = []
+        self._marker_bodies: list[shapes.Circle] = []
+        self._marker_rings: list[shapes.Arc] = []
+
+        for marker in self.world.markers:
+            color = _MARKER_COLORS.get(marker.kind, (210, 210, 210))
+            halo = shapes.Circle(
+                *marker.position, marker.radius + 8.0,
+                color=(38, 42, 44), batch=self.dynamic_batch, group=_GRP_MARKER_HALO,
+            )
+            halo.opacity = 155
+            body = shapes.Circle(
+                *marker.position, marker.radius,
+                color=color, batch=self.dynamic_batch, group=_GRP_MARKER_BODY,
+            )
+            body.opacity = 230
+            ring = shapes.Arc(
+                *marker.position, marker.radius + 4.0,
+                color=(240, 243, 246), segments=32,
+                batch=self.dynamic_batch, group=_GRP_MARKER_RING,
+            )
+            self._marker_halos.append(halo)
+            self._marker_bodies.append(body)
+            self._marker_rings.append(ring)
+
+    def _build_ray_shapes(self) -> None:
+        """Pre-create line + dot for each sensor ray."""
+        self._ray_lines: list[shapes.Line] = []
+        self._ray_dots: list[shapes.Circle] = []
+        for _ in self.world.ray_angles:
+            line = shapes.Line(0, 0, 0, 0, thickness=2, color=(93, 202, 128),
+                               batch=self.dynamic_batch, group=_GRP_RAY)
+            line.opacity = 150
+            dot = shapes.Circle(0, 0, 4.0, color=(93, 202, 128),
+                                batch=self.dynamic_batch, group=_GRP_RAY_DOT)
+            self._ray_lines.append(line)
+            self._ray_dots.append(dot)
+
+    def _build_car_shapes(self) -> None:
+        """Pre-create the car body, heading indicator, velocity vector, and warning halo."""
+        car = self.world.car
+        self._car_body = shapes.Rectangle(
+            car.x, car.y, car.length, car.width,
+            color=(230, 235, 240), batch=self.dynamic_batch, group=_GRP_CAR_BODY,
+        )
+        self._car_body.anchor_position = (car.length * 0.5, car.width * 0.5)
+
+        self._car_heading = shapes.Line(
+            0, 0, 0, 0, thickness=4, color=(55, 134, 225),
+            batch=self.dynamic_batch, group=_GRP_CAR_HEAD,
+        )
+        self._car_velocity = shapes.Line(
+            0, 0, 0, 0, thickness=3, color=(237, 94, 78),
+            batch=self.dynamic_batch, group=_GRP_CAR_VEL,
+        )
+        self._car_velocity.visible = False
+
+        self._car_warning = shapes.Circle(
+            car.x, car.y, car.length * 0.85,
+            color=(215, 58, 58), batch=self.dynamic_batch, group=_GRP_CAR_WARN,
+        )
+        self._car_warning.opacity = 80
+        self._car_warning.visible = False
+
+    def _build_overlay_shapes(self) -> None:
+        """Pre-create all HUD labels and the lap counter panel."""
+        x_stat = 18
+        y_stat = WINDOW_HEIGHT - 24
+        self._stat_labels: list[pyglet.text.Label] = []
+        for i in range(6):
+            lbl = pyglet.text.Label(
+                "", x=x_stat, y=y_stat - i * 22,
+                font_name="Consolas", font_size=12, color=(238, 241, 244, 255),
+                batch=self.overlay_batch, group=_GRP_OVL_TEXT,
+            )
+            self._stat_labels.append(lbl)
+
+        # Lap counter panel.
+        panel_w, panel_h = 172, 74
+        px = self.width - panel_w - 18
+        py = self.height - panel_h - 18
+        self._lap_panel = shapes.Rectangle(
+            px, py, panel_w, panel_h, color=(14, 22, 28),
+            batch=self.overlay_batch, group=_GRP_OVL_BG,
+        )
+        self._lap_panel.opacity = 218
+        self._lap_accent = shapes.Rectangle(
+            px, py, 6, panel_h, color=(62, 175, 245),
+            batch=self.overlay_batch, group=_GRP_OVL_ACCENT,
+        )
+        self._lap_title = pyglet.text.Label(
+            "LAP", x=px + 22, y=py + panel_h - 21,
+            font_name="Consolas", font_size=12, color=(181, 216, 235, 255),
+            batch=self.overlay_batch, group=_GRP_OVL_TEXT,
+        )
+        self._lap_value = pyglet.text.Label(
+            "1", x=px + panel_w - 18, y=py + 28,
+            anchor_x="right", anchor_y="center",
+            font_name="Consolas", font_size=34, color=(246, 250, 255, 255),
+            batch=self.overlay_batch, group=_GRP_OVL_TEXT,
+        )
+        self._lap_detail = pyglet.text.Label(
+            "", x=px + 22, y=py + 13,
+            font_name="Consolas", font_size=10, color=(208, 221, 229, 255),
+            batch=self.overlay_batch, group=_GRP_OVL_TEXT,
+        )
+
+    # ------------------------------------------------------------------
+    # Per-frame shape synchronisation (update, don't recreate)
+    # ------------------------------------------------------------------
+
+    def _sync_dynamic_shapes(self) -> None:
+        """Update positions, colours, and visibility of all world-space shapes."""
+        self._sync_markers()
+        self._sync_rays()
+        self._sync_car()
+
+    def _sync_markers(self) -> None:
+        markers = self.world.markers
+        for i, marker in enumerate(markers):
+            vis = not marker.collected
+            self._marker_halos[i].visible = vis
+            self._marker_bodies[i].visible = vis
+            self._marker_rings[i].visible = vis
+
+    def _sync_rays(self) -> None:
+        origin = self.world.car.position
+        ox, oy = origin
+        rays = self.world.observation["rays"]
+        for i, ray in enumerate(rays):
+            hit = ray["hit"]
+            normalized = float(ray["normalized_distance"])
+            color = self._ray_color(normalized)
+            line = self._ray_lines[i]
+            line.x, line.y = ox, oy
+            line.x2, line.y2 = hit
+            line.color = color
+            dot = self._ray_dots[i]
+            dot.x, dot.y = hit
+            dot.color = color
+
+    def _sync_car(self) -> None:
+        car = self.world.car
+        # Body
+        self._car_body.x = car.x
+        self._car_body.y = car.y
+        self._car_body.rotation = math.degrees(car.heading)
+        # Heading indicator
+        front = angle_to_vector(car.heading)
+        nose_x = car.x + front[0] * car.length * 0.62
+        nose_y = car.y + front[1] * car.length * 0.62
+        self._car_heading.x, self._car_heading.y = car.x, car.y
+        self._car_heading.x2, self._car_heading.y2 = nose_x, nose_y
+        # Velocity vector
+        vx, vy = car.velocity
+        speed = math.hypot(vx, vy)
+        if speed > 1.0:
+            scale = min(0.45, 60.0 / max(speed, 1.0))
+            self._car_velocity.visible = True
+            self._car_velocity.x, self._car_velocity.y = car.x, car.y
+            self._car_velocity.x2 = car.x + vx * scale
+            self._car_velocity.y2 = car.y + vy * scale
+        else:
+            self._car_velocity.visible = False
+        # Off-track warning
+        off_track = bool(self.world.observation["off_track"])
+        self._car_warning.visible = off_track
+        if off_track:
+            self._car_warning.x = car.x
+            self._car_warning.y = car.y
+
+    def _sync_overlay(self) -> None:
+        """Update HUD label text (shapes are already in the overlay batch)."""
+        obs = self.world.observation
+        completed = int(obs["lap"])
+        progress = float(obs["progress"]) * 100.0
+
+        texts = [
+            "AI sandbox: no keyboard control",
+            f"Reward {float(obs['total_reward']):7.2f}   Frame {float(obs['frame_reward']):6.2f}",
+            f"Speed {float(obs['speed']):6.1f}   Drift {float(obs['drift_score']):6.2f}",
+            f"Markers {int(obs['markers_collected'])}/{int(obs['markers_total'])}   Off-track {int(obs['off_track_count'])}",
+            f"Progress {progress:5.1f}%",
+            f"Ray inputs {len(obs['rays'])}   Heading error {math.degrees(float(obs['heading_error'])):6.1f} deg",
+        ]
+        for i, text in enumerate(texts):
+            self._stat_labels[i].text = text
+
+        self._lap_value.text = str(completed + 1)
+        self._lap_detail.text = f"done {completed}   {progress:4.1f}%"
+
+    # ------------------------------------------------------------------
+    # Camera
+    # ------------------------------------------------------------------
 
     def _update_camera(self, dt: float) -> None:
         self._update_camera_controls(dt)
@@ -242,137 +492,6 @@ class RacingWindow(pyglet.window.Window):
         if low > high:
             return (low + high) * 0.5
         return max(low, min(high, value))
-
-    def _draw_markers(self) -> None:
-        color_by_kind = {
-            "apex": (83, 178, 121),
-            "speed": (68, 150, 220),
-            "drift": (222, 156, 65),
-        }
-        for marker in self.world.markers:
-            if marker.collected:
-                continue
-            color = color_by_kind.get(marker.kind, (210, 210, 210))
-            halo = shapes.Circle(*marker.position, marker.radius + 8.0, color=(38, 42, 44))
-            body = shapes.Circle(*marker.position, marker.radius, color=color)
-            ring = shapes.Arc(*marker.position, marker.radius + 4.0, color=(240, 243, 246), segments=32)
-            halo.opacity = 155
-            body.opacity = 230
-            halo.draw()
-            body.draw()
-            ring.draw()
-
-    def _draw_rays(self) -> None:
-        origin = self.world.car.position
-        for ray in self.world.observation["rays"]:
-            hit = ray["hit"]
-            normalized = float(ray["normalized_distance"])
-            color = self._ray_color(normalized)
-            line = shapes.Line(*origin, *hit, thickness=2, color=color)
-            dot = shapes.Circle(hit[0], hit[1], 4.0, color=color)
-            line.opacity = 150
-            line.draw()
-            dot.draw()
-
-    def _draw_car(self) -> None:
-        car = self.world.car
-        body = shapes.Rectangle(car.x, car.y, car.length, car.width, color=(230, 235, 240))
-        body.anchor_position = (car.length * 0.5, car.width * 0.5)
-        body.rotation = math.degrees(car.heading)
-        body.draw()
-
-        front = angle_to_vector(car.heading)
-        nose = (car.x + front[0] * car.length * 0.62, car.y + front[1] * car.length * 0.62)
-        heading_line = shapes.Line(car.x, car.y, nose[0], nose[1], thickness=4, color=(55, 134, 225))
-        heading_line.draw()
-
-        vx, vy = car.velocity
-        speed = math.hypot(vx, vy)
-        if speed > 1.0:
-            scale = min(0.45, 60.0 / max(speed, 1.0))
-            velocity_line = shapes.Line(
-                car.x,
-                car.y,
-                car.x + vx * scale,
-                car.y + vy * scale,
-                thickness=3,
-                color=(237, 94, 78),
-            )
-            velocity_line.draw()
-
-        if bool(self.world.observation["off_track"]):
-            warning = shapes.Circle(car.x, car.y, car.length * 0.85, color=(215, 58, 58))
-            warning.opacity = 80
-            warning.draw()
-
-    def _draw_overlay(self) -> None:
-        obs = self.world.observation
-        self._draw_lap_counter(obs)
-        lines = [
-            "AI sandbox: no keyboard control",
-            f"Reward {float(obs['total_reward']):7.2f}   Frame {float(obs['frame_reward']):6.2f}",
-            f"Speed {float(obs['speed']):6.1f}   Drift {float(obs['drift_score']):6.2f}",
-            f"Markers {int(obs['markers_collected'])}/{int(obs['markers_total'])}   Off-track {int(obs['off_track_count'])}",
-            f"Progress {float(obs['progress']) * 100.0:5.1f}%",
-            f"Ray inputs {len(obs['rays'])}   Heading error {math.degrees(float(obs['heading_error'])):6.1f} deg",
-        ]
-        x = 18
-        y = WINDOW_HEIGHT - 24
-        for index, text in enumerate(lines):
-            label = pyglet.text.Label(
-                text,
-                x=x,
-                y=y - index * 22,
-                font_name="Consolas",
-                font_size=12,
-                color=(238, 241, 244, 255),
-            )
-            label.draw()
-
-    def _draw_lap_counter(self, obs: dict[str, object]) -> None:
-        completed_laps = int(obs["lap"])
-        current_lap = completed_laps + 1
-        progress = float(obs["progress"]) * 100.0
-        panel_width = 172
-        panel_height = 74
-        x = self.width - panel_width - 18
-        y = self.height - panel_height - 18
-
-        panel = shapes.Rectangle(x, y, panel_width, panel_height, color=(14, 22, 28))
-        accent = shapes.Rectangle(x, y, 6, panel_height, color=(62, 175, 245))
-        panel.opacity = 218
-        panel.draw()
-        accent.draw()
-
-        title = pyglet.text.Label(
-            "LAP",
-            x=x + 22,
-            y=y + panel_height - 21,
-            font_name="Consolas",
-            font_size=12,
-            color=(181, 216, 235, 255),
-        )
-        value = pyglet.text.Label(
-            str(current_lap),
-            x=x + panel_width - 18,
-            y=y + 28,
-            anchor_x="right",
-            anchor_y="center",
-            font_name="Consolas",
-            font_size=34,
-            color=(246, 250, 255, 255),
-        )
-        detail = pyglet.text.Label(
-            f"done {completed_laps}   {progress:4.1f}%",
-            x=x + 22,
-            y=y + 13,
-            font_name="Consolas",
-            font_size=10,
-            color=(208, 221, 229, 255),
-        )
-        title.draw()
-        value.draw()
-        detail.draw()
 
     @staticmethod
     def _ray_color(normalized_distance: float) -> tuple[int, int, int]:

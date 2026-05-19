@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass
 
@@ -15,6 +16,7 @@ from racing_ai.math2d import (
     ray_segment_intersection,
     sub,
     vector_angle,
+    wrap_angle,
 )
 
 
@@ -41,6 +43,70 @@ class RewardMarker:
     collected: bool = False
 
 
+class _SegmentGrid:
+    """Uniform spatial grid for O(1)-amortised segment lookup."""
+
+    __slots__ = ("_inv_cell", "_ox", "_oy", "_grid")
+
+    def __init__(
+        self,
+        segments: list[tuple[Point, Point]],
+        bounds: tuple[float, float, float, float],
+        cell_size: float = 280.0,
+    ) -> None:
+        inv = 1.0 / cell_size
+        self._inv_cell = inv
+        self._ox = bounds[0] - cell_size
+        self._oy = bounds[1] - cell_size
+
+        grid: dict[tuple[int, int], list[int]] = {}
+        for idx, (s, e) in enumerate(segments):
+            sx, sy = s
+            ex, ey = e
+            c0x = int((min(sx, ex) - self._ox) * inv)
+            c0y = int((min(sy, ey) - self._oy) * inv)
+            c1x = int((max(sx, ex) - self._ox) * inv)
+            c1y = int((max(sy, ey) - self._oy) * inv)
+            for cx in range(c0x, c1x + 1):
+                for cy in range(c0y, c1y + 1):
+                    key = (cx, cy)
+                    if key in grid:
+                        grid[key].append(idx)
+                    else:
+                        grid[key] = [idx]
+        self._grid = grid
+
+    def query_nearby(self, x: float, y: float) -> list[int]:
+        """Return segment indices in the cell containing (x,y) plus its 8 neighbours."""
+        inv = self._inv_cell
+        cx = int((x - self._ox) * inv)
+        cy = int((y - self._oy) * inv)
+        result: list[int] = []
+        grid = self._grid
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                cell = (cx + dx, cy + dy)
+                if cell in grid:
+                    result.extend(grid[cell])
+        return result
+
+    def query_rect(self, x0: float, y0: float, x1: float, y1: float) -> set[int]:
+        """Return unique segment indices overlapping the given rectangle (with 1-cell margin)."""
+        inv = self._inv_cell
+        c0x = int((x0 - self._ox) * inv) - 1
+        c0y = int((y0 - self._oy) * inv) - 1
+        c1x = int((x1 - self._ox) * inv) + 1
+        c1y = int((y1 - self._oy) * inv) + 1
+        result: set[int] = set()
+        grid = self._grid
+        for cx in range(c0x, c1x + 1):
+            for cy in range(c0y, c1y + 1):
+                cell = (cx, cy)
+                if cell in grid:
+                    result.update(grid[cell])
+        return result
+
+
 class Track:
     def __init__(
         self,
@@ -60,6 +126,28 @@ class Track:
         self.edge_segments = self.inner_segments + self.outer_segments
         self.length = self._polyline_length(centerline)
         self.bounds = self._bounds(inner_boundary + outer_boundary)
+
+        # Pre-compute segment lengths and cumulative distances for binary search.
+        seg_lens: list[float] = []
+        cumulative: list[float] = []
+        total = 0.0
+        for s, e in self.center_segments:
+            d = distance(s, e)
+            seg_lens.append(d)
+            total += d
+            cumulative.append(total)
+        self._segment_lengths = seg_lens
+        self._cumulative_distances = cumulative
+
+        # Build spatial grids for fast lookup.
+        padded_bounds = (
+            self.bounds[0] - width,
+            self.bounds[1] - width,
+            self.bounds[2] + width,
+            self.bounds[3] + width,
+        )
+        self._center_grid = _SegmentGrid(self.center_segments, padded_bounds, cell_size=280.0)
+        self._edge_grid = _SegmentGrid(self.edge_segments, padded_bounds, cell_size=280.0)
 
     @classmethod
     def build_default(cls) -> "Track":
@@ -141,6 +229,12 @@ class Track:
         return markers
 
     def sample_at(self, point: Point) -> TrackSample:
+        candidate_indices = self._center_grid.query_nearby(point[0], point[1])
+
+        if not candidate_indices:
+            # Fallback: full scan (should not happen for points near the track).
+            candidate_indices = range(len(self.center_segments))
+
         best_distance = float("inf")
         best_point = self.centerline[0]
         best_index = 0
@@ -148,7 +242,9 @@ class Track:
         best_normal = (0.0, 1.0)
         best_signed_offset = 0.0
 
-        for index, (start, end) in enumerate(self.center_segments):
+        segments = self.center_segments
+        for index in candidate_indices:
+            start, end = segments[index]
             segment_distance, closest, t = project_point_to_segment(point, start, end)
             if segment_distance < best_distance:
                 best_distance = segment_distance
@@ -159,9 +255,9 @@ class Track:
                 best_normal = (-tangent[1], tangent[0])
                 best_signed_offset = dot(sub(point, closest), best_normal)
 
-        start, end = self.center_segments[best_index]
+        start, end = segments[best_index]
         heading = vector_angle(sub(end, start))
-        progress = (best_index + best_t) / len(self.center_segments)
+        progress = (best_index + best_t) / len(segments)
         signed_distance = 0.0
         if best_distance > 1e-9:
             side = 1.0 if best_signed_offset >= 0.0 else -1.0
@@ -184,7 +280,19 @@ class Track:
         direction = angle_to_vector(angle)
         best_distance = max_distance
 
-        for start, end in self.edge_segments:
+        # Query only edge segments overlapping the ray's bounding rectangle.
+        end_x = origin[0] + direction[0] * max_distance
+        end_y = origin[1] + direction[1] * max_distance
+        candidate_indices = self._edge_grid.query_rect(
+            min(origin[0], end_x),
+            min(origin[1], end_y),
+            max(origin[0], end_x),
+            max(origin[1], end_y),
+        )
+
+        edge_segs = self.edge_segments
+        for idx in candidate_indices:
+            start, end = edge_segs[idx]
             hit_distance = ray_segment_intersection(origin, direction, start, end)
             if hit_distance is not None and hit_distance < best_distance:
                 best_distance = hit_distance
@@ -254,14 +362,15 @@ class Track:
 
     def _point_at_distance(self, target_distance: float) -> tuple[Point, int]:
         wrapped_distance = target_distance % self.length
-        traveled = 0.0
-        for index, (start, end) in enumerate(self.center_segments):
-            segment_length = distance(start, end)
-            if traveled + segment_length >= wrapped_distance:
-                t = (wrapped_distance - traveled) / max(segment_length, 1e-9)
-                return add(start, mul(sub(end, start), t)), index
-            traveled += segment_length
-        return self.centerline[-1], len(self.center_segments) - 1
+        # Binary search on cumulative distances instead of linear scan.
+        index = bisect.bisect_left(self._cumulative_distances, wrapped_distance)
+        if index >= len(self.center_segments):
+            return self.centerline[-1], len(self.center_segments) - 1
+        start, end = self.center_segments[index]
+        seg_len = self._segment_lengths[index]
+        prev_cum = self._cumulative_distances[index - 1] if index > 0 else 0.0
+        t = (wrapped_distance - prev_cum) / max(seg_len, 1e-9)
+        return add(start, mul(sub(end, start), t)), index
 
     def _marker_kind(self, segment_index: int) -> str:
         segment_count = len(self.center_segments)
@@ -270,18 +379,10 @@ class Track:
         next_segment = self.center_segments[(segment_index + lookahead) % segment_count]
         previous_heading = vector_angle(sub(previous_segment[1], previous_segment[0]))
         next_heading = vector_angle(sub(next_segment[1], next_segment[0]))
-        turn_amount = abs(self._wrap_angle(next_heading - previous_heading))
+        turn_amount = abs(wrap_angle(next_heading - previous_heading))
 
         if turn_amount >= 0.20:
             return "drift"
         if turn_amount <= 0.065:
             return "speed"
         return "apex"
-
-    @staticmethod
-    def _wrap_angle(angle: float) -> float:
-        while angle <= -math.pi:
-            angle += math.tau
-        while angle > math.pi:
-            angle -= math.tau
-        return angle

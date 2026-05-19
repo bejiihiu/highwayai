@@ -53,11 +53,7 @@ def vector_angle(a: Point) -> float:
 
 
 def wrap_angle(angle: float) -> float:
-    while angle <= -math.pi:
-        angle += math.tau
-    while angle > math.pi:
-        angle -= math.tau
-    return angle
+    return math.remainder(angle, math.tau)
 
 
 def project_point_to_segment(point: Point, a: Point, b: Point) -> tuple[float, Point, float]:

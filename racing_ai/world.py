@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import math
 from dataclasses import dataclass
 from typing import Mapping
@@ -228,19 +229,24 @@ class RacingWorld:
         self.stats.markers_collected = 0
 
     def _nearest_visible_markers(self, limit: int) -> list[dict[str, object]]:
-        active_markers = [marker for marker in self.markers if not marker.collected]
-        active_markers.sort(key=lambda marker: distance(self.car.position, marker.position))
-        visible = []
-        for marker in active_markers[:limit]:
-            dx = marker.position[0] - self.car.x
-            dy = marker.position[1] - self.car.y
+        car_x, car_y = self.car.x, self.car.y
+        active = [
+            (math.hypot(m.position[0] - car_x, m.position[1] - car_y), m)
+            for m in self.markers
+            if not m.collected
+        ]
+        nearest = heapq.nsmallest(limit, active, key=lambda pair: pair[0])
+        visible: list[dict[str, object]] = []
+        for dist, marker in nearest:
+            dx = marker.position[0] - car_x
+            dy = marker.position[1] - car_y
             visible.append(
                 {
                     "id": marker.marker_id,
                     "kind": marker.kind,
                     "dx": dx,
                     "dy": dy,
-                    "distance": math.hypot(dx, dy),
+                    "distance": dist,
                     "reward": marker.reward,
                 }
             )
