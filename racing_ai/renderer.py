@@ -307,12 +307,13 @@ class RacingWindow(pyglet.window.Window):
 
     def _draw_overlay(self) -> None:
         obs = self.world.observation
+        self._draw_lap_counter(obs)
         lines = [
             "AI sandbox: no keyboard control",
             f"Reward {float(obs['total_reward']):7.2f}   Frame {float(obs['frame_reward']):6.2f}",
             f"Speed {float(obs['speed']):6.1f}   Drift {float(obs['drift_score']):6.2f}",
             f"Markers {int(obs['markers_collected'])}/{int(obs['markers_total'])}   Off-track {int(obs['off_track_count'])}",
-            f"Lap {int(obs['lap'])}   Progress {float(obs['progress']) * 100.0:5.1f}%",
+            f"Progress {float(obs['progress']) * 100.0:5.1f}%",
             f"Ray inputs {len(obs['rays'])}   Heading error {math.degrees(float(obs['heading_error'])):6.1f} deg",
         ]
         x = 18
@@ -327,6 +328,51 @@ class RacingWindow(pyglet.window.Window):
                 color=(238, 241, 244, 255),
             )
             label.draw()
+
+    def _draw_lap_counter(self, obs: dict[str, object]) -> None:
+        completed_laps = int(obs["lap"])
+        current_lap = completed_laps + 1
+        progress = float(obs["progress"]) * 100.0
+        panel_width = 172
+        panel_height = 74
+        x = self.width - panel_width - 18
+        y = self.height - panel_height - 18
+
+        panel = shapes.Rectangle(x, y, panel_width, panel_height, color=(14, 22, 28))
+        accent = shapes.Rectangle(x, y, 6, panel_height, color=(62, 175, 245))
+        panel.opacity = 218
+        panel.draw()
+        accent.draw()
+
+        title = pyglet.text.Label(
+            "LAP",
+            x=x + 22,
+            y=y + panel_height - 21,
+            font_name="Consolas",
+            font_size=12,
+            color=(181, 216, 235, 255),
+        )
+        value = pyglet.text.Label(
+            str(current_lap),
+            x=x + panel_width - 18,
+            y=y + 28,
+            anchor_x="right",
+            anchor_y="center",
+            font_name="Consolas",
+            font_size=34,
+            color=(246, 250, 255, 255),
+        )
+        detail = pyglet.text.Label(
+            f"done {completed_laps}   {progress:4.1f}%",
+            x=x + 22,
+            y=y + 13,
+            font_name="Consolas",
+            font_size=10,
+            color=(208, 221, 229, 255),
+        )
+        title.draw()
+        value.draw()
+        detail.draw()
 
     @staticmethod
     def _ray_color(normalized_distance: float) -> tuple[int, int, int]:
