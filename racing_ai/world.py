@@ -6,7 +6,7 @@ from typing import Mapping
 
 from racing_ai.agent import Agent, Observation, ZeroAgent
 from racing_ai.car import Car, CarPhysics
-from racing_ai.math2d import Point, distance, wrap_angle
+from racing_ai.math2d import Point, angle_to_vector, clamp, distance, dot, wrap_angle
 from racing_ai.track import RewardMarker, Track, TrackSample
 
 
@@ -18,6 +18,8 @@ class WorldStats:
     drift_score: float = 0.0
     markers_collected: int = 0
     off_track_count: int = 0
+    edge_collision_count: int = 0
+    last_edge_impact: float = 0.0
     lap: int = 0
     progress: float = 0.0
     time: float = 0.0
@@ -37,6 +39,8 @@ class RacingWorld:
             for angle in (-135, -95, -65, -35, -15, 0, 15, 35, 65, 95, 135)
         ]
         self.previous_off_track = False
+        self.previous_edge_collision = False
+        self.edge_collision = False
         self.previous_progress = 0.0
         self.last_physics = CarPhysics(0.0, 0.0, 0.0, 0.0, 0.0)
         self.observation = self.build_observation(0.0, self.track.sample_at(self.car.position), self.last_physics)
@@ -48,6 +52,8 @@ class RacingWorld:
             marker.collected = False
         self.stats = WorldStats()
         self.previous_off_track = False
+        self.previous_edge_collision = False
+        self.edge_collision = False
         self.previous_progress = 0.0
         self.last_physics = CarPhysics(0.0, 0.0, 0.0, 0.0, 0.0)
         self.observation = self.build_observation(0.0, self.track.sample_at(self.car.position), self.last_physics)
@@ -64,6 +70,19 @@ class RacingWorld:
         physics = self.car.update(action, dt)
         sample = self.track.sample_at(self.car.position)
         frame_reward = 0.0
+        edge_collision, edge_impact = self._apply_edge_collision(sample)
+        if edge_collision:
+            sample = self.track.sample_at(self.car.position)
+            physics = self._measure_physics()
+
+        self.edge_collision = edge_collision
+        self.stats.last_edge_impact = edge_impact
+        if edge_collision:
+            if not self.previous_edge_collision:
+                self.stats.edge_collision_count += 1
+                frame_reward -= 8.0
+            frame_reward -= 2.0 * dt
+            frame_reward -= edge_impact * 4.0
 
         off_track = not sample.on_track
         if off_track:
@@ -85,6 +104,7 @@ class RacingWorld:
         self.stats.frame_reward = frame_reward
         self.stats.total_reward += frame_reward
         self.previous_off_track = off_track
+        self.previous_edge_collision = edge_collision
         self.last_physics = physics
         self.observation = self.build_observation(frame_reward, sample, physics)
         return self.observation
@@ -126,6 +146,11 @@ class RacingWorld:
             "off_track": off_track,
             "off_track_count": self.stats.off_track_count,
             "distance_to_center": sample.distance_to_center,
+            "signed_distance_to_center": sample.signed_distance_to_center,
+            "edge_clearance": sample.edge_clearance,
+            "edge_collision": self.edge_collision,
+            "edge_collision_count": self.stats.edge_collision_count,
+            "last_edge_impact": self.stats.last_edge_impact,
             "progress": self.stats.progress,
             "lap": self.stats.lap,
             "frame_reward": frame_reward,
@@ -139,6 +164,53 @@ class RacingWorld:
             "car_velocity": self.car.velocity,
         }
 
+    def _apply_edge_collision(self, sample: TrackSample) -> tuple[bool, float]:
+        collision_radius = self.car.width * 0.55
+        penetration = collision_radius - sample.edge_clearance
+        if penetration <= 0.0:
+            return False, 0.0
+
+        collision_band = self.track.half_width + collision_radius + 24.0
+        if sample.distance_to_center > collision_band:
+            return False, 0.0
+
+        side = 1.0 if sample.signed_distance_to_center >= 0.0 else -1.0
+        outward = (sample.normal[0] * side, sample.normal[1] * side)
+        inward = (-outward[0], -outward[1])
+
+        self.car.x += inward[0] * (penetration + 0.01)
+        self.car.y += inward[1] * (penetration + 0.01)
+
+        outward_speed = max(0.0, dot(self.car.velocity, outward))
+        if outward_speed > 0.0:
+            self.car.vx -= outward[0] * outward_speed
+            self.car.vy -= outward[1] * outward_speed
+
+        self.car.vx *= 0.84
+        self.car.vy *= 0.84
+
+        impact_from_depth = clamp(penetration / max(collision_radius, 1.0), 0.0, 1.0)
+        impact_from_speed = clamp(outward_speed / 240.0, 0.0, 1.0)
+        return True, impact_from_depth + impact_from_speed
+
+    def _measure_physics(self) -> CarPhysics:
+        forward = angle_to_vector(self.car.heading)
+        right = (-forward[1], forward[0])
+        forward_speed = dot(self.car.velocity, forward)
+        lateral_speed = dot(self.car.velocity, right)
+        speed = math.hypot(self.car.vx, self.car.vy)
+        slip_angle = math.atan2(lateral_speed, abs(forward_speed) + 1e-6)
+        drift_intensity = 0.0
+        if speed > 45.0:
+            drift_intensity = clamp((abs(slip_angle) - 0.14) / 0.75, 0.0, 1.0)
+        return CarPhysics(
+            speed=speed,
+            forward_speed=forward_speed,
+            lateral_speed=lateral_speed,
+            slip_angle=slip_angle,
+            drift_intensity=drift_intensity,
+        )
+
     def _collect_markers(self) -> float:
         reward = 0.0
         for marker in self.markers:
@@ -149,6 +221,11 @@ class RacingWorld:
                 self.stats.markers_collected += 1
                 reward += marker.reward
         return reward
+
+    def _restore_markers_for_next_lap(self) -> None:
+        for marker in self.markers:
+            marker.collected = False
+        self.stats.markers_collected = 0
 
     def _nearest_visible_markers(self, limit: int) -> list[dict[str, object]]:
         active_markers = [marker for marker in self.markers if not marker.collected]
@@ -173,5 +250,6 @@ class RacingWorld:
         progress = sample.progress
         if self.previous_progress > 0.86 and progress < 0.14:
             self.stats.lap += 1
+            self._restore_markers_for_next_lap()
         self.previous_progress = progress
         self.stats.progress = progress
