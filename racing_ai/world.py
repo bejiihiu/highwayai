@@ -17,13 +17,17 @@ class WorldStats:
     frame_reward: float = 0.0
     marker_reward: float = 0.0
     drift_score: float = 0.0
-    markers_collected: int = 0
+    lap_markers_collected: int = 0
+    total_markers_collected: int = 0
     off_track_count: int = 0
     edge_collision_count: int = 0
     last_edge_impact: float = 0.0
     lap: int = 0
     progress: float = 0.0
     time: float = 0.0
+    smooth_steering_bonus: float = 0.0
+    trail_brake_bonus: float = 0.0
+    clean_lap_bonus: float = 0.0
 
 
 class RacingWorld:
@@ -42,8 +46,9 @@ class RacingWorld:
         self.previous_off_track = False
         self.previous_edge_collision = False
         self.edge_collision = False
-        self.previous_progress = 0.0
-        self.last_physics = CarPhysics(0.0, 0.0, 0.0, 0.0, 0.0)
+        self.lap_cooldown = 0.0
+        self.previous_progress = self.track.sample_at(self.car.position).progress
+        self.last_physics = CarPhysics(0.0, 0.0, 0.0, 0.0, 0.0, 1000.0, 1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         self.observation = self.build_observation(0.0, self.track.sample_at(self.car.position), self.last_physics)
 
     def reset(self) -> Observation:
@@ -55,8 +60,9 @@ class RacingWorld:
         self.previous_off_track = False
         self.previous_edge_collision = False
         self.edge_collision = False
-        self.previous_progress = 0.0
-        self.last_physics = CarPhysics(0.0, 0.0, 0.0, 0.0, 0.0)
+        self.lap_cooldown = 0.0
+        self.previous_progress = self.track.sample_at(self.car.position).progress
+        self.last_physics = CarPhysics(0.0, 0.0, 0.0, 0.0, 0.0, 1000.0, 1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         self.observation = self.build_observation(0.0, self.track.sample_at(self.car.position), self.last_physics)
         return self.observation
 
@@ -101,7 +107,14 @@ class RacingWorld:
             self.stats.drift_score += drift_points
             frame_reward += drift_points * 0.25
 
-        self._update_lap_and_progress(sample)
+        # Example RL bonuses
+        brake_val = action.get("brake", 0.0)
+        steer_val = action.get("steer", 0.0)
+        if brake_val > 0.1 and abs(steer_val) > 0.1:
+            self.stats.trail_brake_bonus += dt * 0.5
+            frame_reward += dt * 0.5
+
+        self._update_lap_and_progress(sample, dt)
         self.stats.frame_reward = frame_reward
         self.stats.total_reward += frame_reward
         self.previous_off_track = off_track
@@ -144,6 +157,18 @@ class RacingWorld:
             "slip_angle": physics.slip_angle,
             "drift_intensity": physics.drift_intensity,
             "drift_score": self.stats.drift_score,
+            
+            "rpm": physics.rpm,
+            "gear": physics.gear,
+            "wheel_spin_front": physics.wheel_spin_front,
+            "wheel_spin_rear": physics.wheel_spin_rear,
+            "front_load": physics.front_load,
+            "rear_load": physics.rear_load,
+            "yaw_rate": physics.yaw_rate,
+            "angular_velocity": physics.angular_velocity,
+            "longitudinal_g": physics.longitudinal_g,
+            "lateral_g": physics.lateral_g,
+
             "off_track": off_track,
             "off_track_count": self.stats.off_track_count,
             "distance_to_center": sample.distance_to_center,
@@ -156,7 +181,8 @@ class RacingWorld:
             "lap": self.stats.lap,
             "frame_reward": frame_reward,
             "total_reward": self.stats.total_reward,
-            "markers_collected": self.stats.markers_collected,
+            "markers_collected": self.stats.lap_markers_collected,
+            "total_markers_collected": self.stats.total_markers_collected,
             "markers_total": len(self.markers),
             "marker_reward": self.stats.marker_reward,
             "rays": rays,
@@ -192,7 +218,7 @@ class RacingWorld:
 
         impact_from_depth = clamp(penetration / max(collision_radius, 1.0), 0.0, 1.0)
         impact_from_speed = clamp(outward_speed / 240.0, 0.0, 1.0)
-        return True, impact_from_depth + impact_from_speed
+        return True, clamp(impact_from_depth + impact_from_speed, 0.0, 1.0)
 
     def _measure_physics(self) -> CarPhysics:
         forward = angle_to_vector(self.car.heading)
@@ -204,12 +230,23 @@ class RacingWorld:
         drift_intensity = 0.0
         if speed > 45.0:
             drift_intensity = clamp((abs(slip_angle) - 0.14) / 0.75, 0.0, 1.0)
+            
         return CarPhysics(
             speed=speed,
             forward_speed=forward_speed,
             lateral_speed=lateral_speed,
             slip_angle=slip_angle,
             drift_intensity=drift_intensity,
+            rpm=self.last_physics.rpm,
+            gear=self.last_physics.gear,
+            wheel_spin_front=0.0,
+            wheel_spin_rear=0.0,
+            front_load=self.last_physics.front_load,
+            rear_load=self.last_physics.rear_load,
+            yaw_rate=self.last_physics.yaw_rate,
+            angular_velocity=self.last_physics.angular_velocity,
+            longitudinal_g=self.last_physics.longitudinal_g,
+            lateral_g=self.last_physics.lateral_g
         )
 
     def _collect_markers(self) -> float:
@@ -217,16 +254,17 @@ class RacingWorld:
         for marker in self.markers:
             if marker.collected:
                 continue
-            if distance(self.car.position, marker.position) <= marker.radius + self.car.length * 0.35:
+            if distance(self.car.position, marker.position) <= marker.radius + 12.0:
                 marker.collected = True
-                self.stats.markers_collected += 1
+                self.stats.lap_markers_collected += 1
+                self.stats.total_markers_collected += 1
                 reward += marker.reward
         return reward
 
     def _restore_markers_for_next_lap(self) -> None:
         for marker in self.markers:
             marker.collected = False
-        self.stats.markers_collected = 0
+        self.stats.lap_markers_collected = 0
 
     def _nearest_visible_markers(self, limit: int) -> list[dict[str, object]]:
         car_x, car_y = self.car.x, self.car.y
@@ -252,10 +290,13 @@ class RacingWorld:
             )
         return visible
 
-    def _update_lap_and_progress(self, sample: TrackSample) -> None:
+    def _update_lap_and_progress(self, sample: TrackSample, dt: float) -> None:
         progress = sample.progress
-        if self.previous_progress > 0.86 and progress < 0.14:
+        self.lap_cooldown -= dt
+        if self.previous_progress > 0.86 and progress < 0.14 and self.lap_cooldown <= 0.0:
             self.stats.lap += 1
+            self.lap_cooldown = 5.0
             self._restore_markers_for_next_lap()
         self.previous_progress = progress
         self.stats.progress = progress
+

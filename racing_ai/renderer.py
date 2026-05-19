@@ -41,6 +41,16 @@ _MARKER_COLORS = {
     "apex": (83, 178, 121),
     "speed": (68, 150, 220),
     "drift": (222, 156, 65),
+    "braking_zone": (220, 50, 50),
+    "late_apex": (100, 200, 150),
+    "chicane": (180, 100, 220),
+    "overtake_zone": (255, 100, 50),
+    "pit_entry": (150, 150, 150),
+    "clean_line": (50, 220, 180),
+    "acceleration_zone": (255, 200, 50),
+    "elevation_crest": (120, 180, 200),
+    "fuel_save": (150, 220, 50),
+    "time_bonus": (255, 255, 100),
 }
 
 
@@ -296,7 +306,7 @@ class RacingWindow(pyglet.window.Window):
         x_stat = 18
         y_stat = WINDOW_HEIGHT - 24
         self._stat_labels: list[pyglet.text.Label] = []
-        for i in range(6):
+        for i in range(12):
             lbl = pyglet.text.Label(
                 "", x=x_stat, y=y_stat - i * 22,
                 font_name="Consolas", font_size=12, color=(238, 241, 244, 255),
@@ -373,7 +383,7 @@ class RacingWindow(pyglet.window.Window):
         # Body
         self._car_body.x = car.x
         self._car_body.y = car.y
-        self._car_body.rotation = math.degrees(car.heading)
+        self._car_body.rotation = -math.degrees(car.heading)
         # Heading indicator
         front = angle_to_vector(car.heading)
         nose_x = car.x + front[0] * car.length * 0.62
@@ -411,9 +421,16 @@ class RacingWindow(pyglet.window.Window):
             f"Markers {int(obs['markers_collected'])}/{int(obs['markers_total'])}   Off-track {int(obs['off_track_count'])}",
             f"Progress {progress:5.1f}%",
             f"Ray inputs {len(obs['rays'])}   Heading error {math.degrees(float(obs['heading_error'])):6.1f} deg",
+            f"RPM {float(obs['rpm']):.0f}   Gear {int(obs['gear'])}",
+            f"Lat G {float(obs['lateral_g']):.2f}   Long G {float(obs['longitudinal_g']):.2f}",
+            f"Total Markers {int(obs['total_markers_collected'])}",
         ]
-        for i, text in enumerate(texts):
-            self._stat_labels[i].text = text
+        
+        for i in range(len(self._stat_labels)):
+            if i < len(texts):
+                self._stat_labels[i].text = texts[i]
+            else:
+                self._stat_labels[i].text = ""
 
         self._lap_value.text = str(completed + 1)
         self._lap_detail.text = f"done {completed}   {progress:4.1f}%"

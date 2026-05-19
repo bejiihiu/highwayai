@@ -210,13 +210,30 @@ class Track:
 
     def reward_markers(self) -> list[RewardMarker]:
         markers: list[RewardMarker] = []
-        marker_spacing = 300.0
+        marker_spacing = 150.0
         marker_count = max(1, int(self.length // marker_spacing))
+        
+        reward_map = {
+            "apex": 4.0,
+            "speed": 5.0,
+            "drift": 7.0,
+            "braking_zone": 3.5,
+            "late_apex": 4.5,
+            "chicane": 5.5,
+            "overtake_zone": 3.0,
+            "pit_entry": 2.0,
+            "clean_line": 4.0,
+            "acceleration_zone": 4.5,
+            "elevation_crest": 3.0,
+            "fuel_save": 2.5,
+            "time_bonus": 6.0,
+        }
+
         for marker_id in range(marker_count):
             marker_distance = (marker_id + 0.5) * self.length / marker_count
             position, segment_index = self._point_at_distance(marker_distance)
-            kind = self._marker_kind(segment_index)
-            reward = {"apex": 4.0, "speed": 5.0, "drift": 7.0}[kind]
+            kind = self._marker_kind(segment_index, marker_id)
+            reward = reward_map.get(kind, 3.0)
             markers.append(
                 RewardMarker(
                     marker_id=marker_id,
@@ -372,17 +389,47 @@ class Track:
         t = (wrapped_distance - prev_cum) / max(seg_len, 1e-9)
         return add(start, mul(sub(end, start), t)), index
 
-    def _marker_kind(self, segment_index: int) -> str:
+    def _marker_kind(self, segment_index: int, marker_id: int) -> str:
         segment_count = len(self.center_segments)
-        lookahead = 6
-        previous_segment = self.center_segments[(segment_index - lookahead) % segment_count]
-        next_segment = self.center_segments[(segment_index + lookahead) % segment_count]
-        previous_heading = vector_angle(sub(previous_segment[1], previous_segment[0]))
-        next_heading = vector_angle(sub(next_segment[1], next_segment[0]))
-        turn_amount = abs(wrap_angle(next_heading - previous_heading))
+        
+        def get_turn(offset: int, lookahead: int = 6) -> float:
+            prev_seg = self.center_segments[(segment_index + offset - lookahead) % segment_count]
+            next_seg = self.center_segments[(segment_index + offset + lookahead) % segment_count]
+            prev_head = vector_angle(sub(prev_seg[1], prev_seg[0]))
+            next_head = vector_angle(sub(next_seg[1], next_seg[0]))
+            return wrap_angle(next_head - prev_head)
 
-        if turn_amount >= 0.20:
-            return "drift"
-        if turn_amount <= 0.065:
+        current_turn = get_turn(0)
+        abs_turn = abs(current_turn)
+        next_turn = get_turn(15)
+        prev_turn = get_turn(-15)
+
+        if marker_id % 17 == 0:
+            return "time_bonus"
+        if marker_id % 23 == 0:
+            return "pit_entry"
+        if marker_id % 31 == 0:
+            return "elevation_crest"
+            
+        if abs_turn <= 0.05:
+            if abs(next_turn) > 0.15:
+                return "braking_zone"
+            if abs(prev_turn) > 0.15:
+                return "acceleration_zone"
+            if marker_id % 5 == 0:
+                return "fuel_save"
+            if marker_id % 7 == 0:
+                return "overtake_zone"
             return "speed"
+            
+        if abs_turn >= 0.25:
+            if current_turn * next_turn < -0.05:
+                return "chicane"
+            return "drift"
+            
+        if abs(next_turn) > abs_turn:
+            return "late_apex"
+        if abs(prev_turn) > abs_turn:
+            return "clean_line"
+            
         return "apex"

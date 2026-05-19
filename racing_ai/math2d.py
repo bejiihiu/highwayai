@@ -40,7 +40,7 @@ def distance(a: Point, b: Point) -> float:
 def normalize(a: Point) -> Point:
     size = length(a)
     if size <= 1e-9:
-        return (1.0, 0.0)
+        return (0.0, 0.0)
     return (a[0] / size, a[1] / size)
 
 
