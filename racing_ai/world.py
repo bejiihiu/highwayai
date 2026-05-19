@@ -28,6 +28,8 @@ class WorldStats:
     smooth_steering_bonus: float = 0.0
     trail_brake_bonus: float = 0.0
     clean_lap_bonus: float = 0.0
+    stall_count: int = 0
+    money_shift_count: int = 0
 
 
 class RacingWorld:
@@ -48,7 +50,7 @@ class RacingWorld:
         self.edge_collision = False
         self.lap_cooldown = 0.0
         self.previous_progress = self.track.sample_at(self.car.position).progress
-        self.last_physics = CarPhysics(0.0, 0.0, 0.0, 0.0, 0.0, 1000.0, 1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        self.last_physics = CarPhysics(0.0, 0.0, 0.0, 0.0, 0.0, 1000.0, 1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False)
         self.observation = self.build_observation(0.0, self.track.sample_at(self.car.position), self.last_physics)
 
     def reset(self) -> Observation:
@@ -62,7 +64,7 @@ class RacingWorld:
         self.edge_collision = False
         self.lap_cooldown = 0.0
         self.previous_progress = self.track.sample_at(self.car.position).progress
-        self.last_physics = CarPhysics(0.0, 0.0, 0.0, 0.0, 0.0, 1000.0, 1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        self.last_physics = CarPhysics(0.0, 0.0, 0.0, 0.0, 0.0, 1000.0, 1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False)
         self.observation = self.build_observation(0.0, self.track.sample_at(self.car.position), self.last_physics)
         return self.observation
 
@@ -114,6 +116,16 @@ class RacingWorld:
             self.stats.trail_brake_bonus += dt * 0.5
             frame_reward += dt * 0.5
 
+        # Gearbox penalties
+        if self.car.stalled and self.last_physics and not self.last_physics.stalled:
+            self.stats.stall_count += 1
+            frame_reward -= 10.0
+
+        if self.car.money_shift_damage > 0.0 and (not hasattr(self, '_prev_money_damage') or self.car.money_shift_damage > self._prev_money_damage):
+            self.stats.money_shift_count += 1
+            frame_reward -= 15.0
+        self._prev_money_damage = self.car.money_shift_damage
+
         self._update_lap_and_progress(sample, dt)
         self.stats.frame_reward = frame_reward
         self.stats.total_reward += frame_reward
@@ -160,6 +172,8 @@ class RacingWorld:
             
             "rpm": physics.rpm,
             "gear": physics.gear,
+            "clutch": physics.clutch,
+            "stalled": physics.stalled,
             "wheel_spin_front": physics.wheel_spin_front,
             "wheel_spin_rear": physics.wheel_spin_rear,
             "front_load": physics.front_load,
@@ -189,6 +203,10 @@ class RacingWorld:
             "nearest_markers": nearest_markers,
             "car_position": self.car.position,
             "car_velocity": self.car.velocity,
+            "stall_count": self.stats.stall_count,
+            "money_shift_count": self.stats.money_shift_count,
+            "money_shift_damage": self.car.money_shift_damage,
+            "gear_shift_count": self.car.gear_shift_count,
         }
 
     def _apply_edge_collision(self, sample: TrackSample) -> tuple[bool, float]:
@@ -246,7 +264,9 @@ class RacingWorld:
             yaw_rate=self.last_physics.yaw_rate,
             angular_velocity=self.last_physics.angular_velocity,
             longitudinal_g=self.last_physics.longitudinal_g,
-            lateral_g=self.last_physics.lateral_g
+            lateral_g=self.last_physics.lateral_g,
+            clutch=self.last_physics.clutch,
+            stalled=self.last_physics.stalled,
         )
 
     def _collect_markers(self) -> float:
@@ -299,4 +319,3 @@ class RacingWorld:
             self._restore_markers_for_next_lap()
         self.previous_progress = progress
         self.stats.progress = progress
-

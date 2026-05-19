@@ -24,6 +24,8 @@ class CarPhysics:
     angular_velocity: float
     longitudinal_g: float
     lateral_g: float
+    clutch: float
+    stalled: bool
 
 
 class Car:
@@ -56,6 +58,16 @@ class Car:
         self.final_drive = 3.8
         self.wheel_radius = 12.0
         
+        # Manual gearbox state
+        self.clutch = 0.0           # 0=fully engaged, 1=fully disengaged
+        self.stalled = False
+        self.stall_timer = 0.0
+        self.shift_lockout = 0.0    # countdown timer (seconds)
+        self.prev_gear = 1
+        self.money_shift_damage = 0.0  # accumulated mechanical damage 0..1
+        self.gear_shift_count = 0
+        self.gear_shift_window = 0.0   # timer for gear-hunting detection
+        
         # State
         self.long_accel = 0.0
         self.lat_accel = 0.0
@@ -77,6 +89,14 @@ class Car:
         self.angular_velocity = 0.0
         self.rpm = self.idle_rpm
         self.gear = 1
+        self.clutch = 0.0
+        self.stalled = False
+        self.stall_timer = 0.0
+        self.shift_lockout = 0.0
+        self.prev_gear = 1
+        self.money_shift_damage = 0.0
+        self.gear_shift_count = 0
+        self.gear_shift_window = 0.0
         self.long_accel = 0.0
         self.lat_accel = 0.0
 
@@ -95,9 +115,79 @@ class Car:
         x = b * slip
         return d * math.sin(c * math.atan(x - e * (x - math.atan(x))))
 
+    def _process_gearbox(self, action: Mapping[str, float], forward_speed: float, dt: float) -> tuple[bool, bool]:
+        """Process manual gearbox. Returns (stall_event, money_shift_event)."""
+        stall_event = False
+        money_shift_event = False
+
+        self.clutch = clamp(float(action.get("clutch", 0.0)), 0.0, 1.0)
+        gear_up = float(action.get("gear_up", 0.0)) > 0.5
+        gear_down = float(action.get("gear_down", 0.0)) > 0.5
+
+        # Shift lockout countdown
+        self.shift_lockout = max(0.0, self.shift_lockout - dt)
+
+        # Gear-hunting tracker
+        self.gear_shift_window = max(0.0, self.gear_shift_window - dt)
+        if self.gear_shift_window <= 0.0:
+            self.gear_shift_count = 0
+
+        # Handle stall recovery
+        if self.stalled:
+            self.stall_timer -= dt
+            if self.stall_timer <= 0.0:
+                self.stalled = False
+                self.rpm = self.idle_rpm
+            return stall_event, money_shift_event
+
+        # Process gear changes (only if clutch is mostly disengaged and no lockout)
+        if self.shift_lockout <= 0.0 and self.clutch > 0.6:
+            new_gear = self.gear
+            if gear_up and not gear_down:
+                if self.gear == -1:
+                    new_gear = 0  # R -> N
+                elif self.gear < 5:
+                    new_gear = self.gear + 1
+            elif gear_down and not gear_up:
+                if self.gear == 0:
+                    new_gear = -1  # N -> R
+                elif self.gear > -1:
+                    new_gear = self.gear - 1
+
+            if new_gear != self.gear:
+                # Check for money-shift on downshift
+                if new_gear > 0 and new_gear < self.gear:
+                    target_ratio = self.gear_ratios[new_gear]
+                    projected_rpm = abs(forward_speed * target_ratio * self.final_drive * 60.0 / (2.0 * math.pi * self.wheel_radius))
+                    if projected_rpm > self.max_rpm * 1.1:
+                        # Money-shift! Mechanical damage
+                        money_shift_event = True
+                        self.money_shift_damage = min(1.0, self.money_shift_damage + 0.25)
+                        self.vx *= 0.7
+                        self.vy *= 0.7
+
+                self.prev_gear = self.gear
+                self.gear = new_gear
+                self.shift_lockout = 0.15  # 150ms synchro time
+                self.gear_shift_count += 1
+                self.gear_shift_window = 2.0
+
+        # Check for rev-match quality on clutch engagement
+        # RPM matching happens naturally through the clutch engagement below
+
+        # Stall check: RPM too low with clutch engaged and car nearly stopped
+        if self.clutch < 0.3 and self.gear != 0 and abs(forward_speed) < 20.0:
+            if self.rpm < 600.0:
+                self.stalled = True
+                self.stall_timer = 1.0
+                stall_event = True
+                self.rpm = 0.0
+
+        return stall_event, money_shift_event
+
     def update(self, action: Mapping[str, float], dt: float) -> CarPhysics:
         if dt <= 0.0:
-            return CarPhysics(0,0,0,0,0,0,1,0,0,0,0,0,0,0,0)
+            return CarPhysics(0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0.0,False)
             
         throttle = clamp(float(action.get("throttle", 0.0)), -1.0, 1.0)
         steer = clamp(float(action.get("steer", 0.0)), -1.0, 1.0)
@@ -115,36 +205,54 @@ class Car:
             forward_speed = 0.0
             lateral_speed = 0.0
 
-        # Automatic transmission (simple)
-        if throttle >= 0.0:
-            if forward_speed < -10.0:
-                self.gear = -1
-                brake = max(brake, throttle) # Braking if moving backward and pressing throttle
-                throttle = 0.0
-            elif self.gear <= 0:
-                self.gear = 1
-                
-            if self.gear > 0 and self.rpm > 7000.0 and self.gear < 5:
-                self.gear += 1
-            elif self.gear > 1 and self.rpm < 3000.0:
-                self.gear -= 1
-        elif throttle < 0.0:
-            if forward_speed > 10.0:
+        # Manual gearbox processing
+        stall_event, money_shift_event = self._process_gearbox(action, forward_speed, dt)
+
+        # Handle reverse throttle mapping
+        if throttle < 0.0:
+            if self.gear == -1:
+                throttle = abs(throttle)
+            elif forward_speed > 10.0:
                 brake = max(brake, abs(throttle))
                 throttle = 0.0
             else:
-                self.gear = -1
-                throttle = abs(throttle) # apply throttle in reverse
+                throttle = 0.0
 
         gear_ratio = self.gear_ratios[self.gear] if self.gear > 0 else (self.reverse_ratio if self.gear == -1 else 0.0)
         
-        # RPM calculation
-        wheel_speed = forward_speed
-        self.rpm = clamp(abs(wheel_speed * gear_ratio * self.final_drive * 60.0 / (2.0 * math.pi * self.wheel_radius)), self.idle_rpm, self.max_rpm)
+        # RPM calculation with clutch
+        wheel_rpm = abs(forward_speed * gear_ratio * self.final_drive * 60.0 / (2.0 * math.pi * self.wheel_radius))
         
-        # Engine Torque
-        engine_torque = self.get_torque(self.rpm) * throttle
-        drive_torque = engine_torque * gear_ratio * self.final_drive
+        if self.stalled:
+            self.rpm = 0.0
+        elif self.clutch > 0.95:
+            # Clutch fully disengaged - engine free-revs
+            if throttle > 0.0:
+                self.rpm = clamp(self.rpm + throttle * 12000.0 * dt, self.idle_rpm, self.max_rpm)
+            else:
+                self.rpm = clamp(self.rpm - 4000.0 * dt, self.idle_rpm, self.max_rpm)
+        else:
+            # Blend between engine RPM and wheel RPM based on clutch
+            clutch_blend = self.clutch  # 0=fully engaged, 1=disengaged
+            target_rpm = clamp(wheel_rpm, self.idle_rpm, self.max_rpm)
+            free_rpm = self.rpm
+            if throttle > 0.0:
+                free_rpm = clamp(self.rpm + throttle * 12000.0 * dt, self.idle_rpm, self.max_rpm)
+            self.rpm = clamp(
+                free_rpm * clutch_blend + target_rpm * (1.0 - clutch_blend),
+                0.0 if self.stalled else self.idle_rpm,
+                self.max_rpm
+            )
+        
+        # Engine Torque (reduced by clutch slip and damage)
+        effective_throttle = throttle if not self.stalled else 0.0
+        engine_torque = self.get_torque(self.rpm) * effective_throttle
+        # Clutch transmits torque proportional to engagement
+        clutch_transfer = 1.0 - self.clutch  # 0 when disengaged, 1 when engaged
+        transmitted_torque = engine_torque * clutch_transfer
+        # Apply mechanical damage from money-shifts
+        damage_factor = 1.0 - self.money_shift_damage * 0.5
+        drive_torque = transmitted_torque * gear_ratio * self.final_drive * damage_factor
         drive_force = drive_torque / self.wheel_radius
 
         # Aero and rolling resistance
@@ -240,5 +348,7 @@ class Car:
             yaw_rate=self.angular_velocity,
             angular_velocity=self.angular_velocity,
             longitudinal_g=long_g,
-            lateral_g=lat_g
+            lateral_g=lat_g,
+            clutch=self.clutch,
+            stalled=self.stalled,
         )

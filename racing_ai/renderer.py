@@ -415,17 +415,28 @@ class RacingWindow(pyglet.window.Window):
         progress = float(obs["progress"]) * 100.0
 
         texts = [
-            "AI sandbox: no keyboard control",
-            f"Reward {float(obs['total_reward']):7.2f}   Frame {float(obs['frame_reward']):6.2f}",
-            f"Speed {float(obs['speed']):6.1f}   Drift {float(obs['drift_score']):6.2f}",
-            f"Markers {int(obs['markers_collected'])}/{int(obs['markers_total'])}   Off-track {int(obs['off_track_count'])}",
+            "AI Sandbox | DQN Agent",
+            f"Reward {float(obs.get('total_reward', 0)):7.2f}   Frame {float(obs.get('frame_reward', 0)):6.2f}",
+            f"Speed {float(obs.get('speed', 0)):6.1f}   Drift {float(obs.get('drift_score', 0)):6.2f}",
+            f"Markers {int(obs.get('markers_collected', 0))}/{int(obs.get('markers_total', 0))}   Off-track {int(obs.get('off_track_count', 0))}",
             f"Progress {progress:5.1f}%",
-            f"Ray inputs {len(obs['rays'])}   Heading error {math.degrees(float(obs['heading_error'])):6.1f} deg",
-            f"RPM {float(obs['rpm']):.0f}   Gear {int(obs['gear'])}",
-            f"Lat G {float(obs['lateral_g']):.2f}   Long G {float(obs['longitudinal_g']):.2f}",
-            f"Total Markers {int(obs['total_markers_collected'])}",
+            f"Ray inputs {len(obs.get('rays', []))}   Heading error {math.degrees(float(obs.get('heading_error', 0))):6.1f} deg",
+            f"RPM {float(obs.get('rpm', 0)):.0f}   Gear {int(obs.get('gear', 1))}   Clutch {float(obs.get('clutch', 0)):.2f}",
+            f"Lat G {float(obs.get('lateral_g', 0)):.2f}   Long G {float(obs.get('longitudinal_g', 0)):.2f}",
+            f"Total Markers {int(obs.get('total_markers_collected', 0))}",
         ]
         
+        stalled = obs.get("stalled", False)
+        if stalled:
+            texts[6] += " [STALLED]"
+            self._stat_labels[6].color = (255, 100, 100, 255)
+        else:
+            self._stat_labels[6].color = (238, 241, 244, 255)
+            
+        money_shift_dmg = float(obs.get("money_shift_damage", 0.0))
+        if money_shift_dmg > 0.0:
+            texts.append(f"GBX DMG: {money_shift_dmg*100:.0f}%")
+            
         for i in range(len(self._stat_labels)):
             if i < len(texts):
                 self._stat_labels[i].text = texts[i]
