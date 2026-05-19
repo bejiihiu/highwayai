@@ -11,8 +11,8 @@ from racing_ai.math2d import angle_to_vector
 from racing_ai.world import RacingWorld
 
 
-WINDOW_WIDTH = 1100
-WINDOW_HEIGHT = 760
+WINDOW_WIDTH = 1920
+WINDOW_HEIGHT = 1080
 CAMERA_EDGE_SCROLL_MARGIN = 28
 CAMERA_SCROLL_SPEED = 920.0
 CAMERA_FOLLOW_SPEED = 6.5
@@ -413,15 +413,24 @@ class RacingWindow(pyglet.window.Window):
         obs = self.world.observation
         completed = int(obs["lap"])
         progress = float(obs["progress"]) * 100.0
+        virtual_keys = obs.get("virtual_keys", {})
+        key_on = lambda name: bool(virtual_keys.get(name, False))
+        keys_line = (
+            f"Keys W/Ц[{int(key_on('w'))}] A/Ф[{int(key_on('a'))}] "
+            f"S/Ы[{int(key_on('s'))}] D/В[{int(key_on('d'))}] | "
+            f"C[{int(key_on('clutch_key'))}] | H[{int(key_on('handbrake_key'))}] | "
+            f"U[{int(key_on('gear_up_key'))}] | J[{int(key_on('gear_down_key'))}]"
+        )
 
         texts = [
-            "AI Sandbox | DQN Agent",
+            "AI Sandbox | Hybrid RL Policy",
             f"Reward {float(obs.get('total_reward', 0)):7.2f}   Frame {float(obs.get('frame_reward', 0)):6.2f}",
-            f"Speed {float(obs.get('speed', 0)):6.1f}   Drift {float(obs.get('drift_score', 0)):6.2f}",
-            f"Markers {int(obs.get('markers_collected', 0))}/{int(obs.get('markers_total', 0))}   Off-track {int(obs.get('off_track_count', 0))}",
+            f"Speed {float(obs.get('speed_kmh', 0)):6.1f} km/h",
+            f"RPM {float(obs.get('rpm', 0)):.0f}   Gear {int(obs.get('gear', 1))}   Clutch {float(obs.get('clutch', 0)):.2f}",
+            f"Markers {int(obs.get('markers_collected', 0))}/{int(obs.get('markers_total', 0))}   Off-track {int(obs.get('off_track_count', 0))}   Deaths {int(obs.get('death_count', 0))}",
             f"Progress {progress:5.1f}%",
             f"Ray inputs {len(obs.get('rays', []))}   Heading error {math.degrees(float(obs.get('heading_error', 0))):6.1f} deg",
-            f"RPM {float(obs.get('rpm', 0)):.0f}   Gear {int(obs.get('gear', 1))}   Clutch {float(obs.get('clutch', 0)):.2f}",
+            keys_line,
             f"Lat G {float(obs.get('lateral_g', 0)):.2f}   Long G {float(obs.get('longitudinal_g', 0)):.2f}",
             f"Total Markers {int(obs.get('total_markers_collected', 0))}",
         ]

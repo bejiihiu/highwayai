@@ -47,6 +47,7 @@ class RacingWorldTest(unittest.TestCase):
         self.assertTrue(all(0.0 <= ray["normalized_distance"] <= 1.0 for ray in observation["rays"]))
         for key in (
             "speed",
+            "speed_kmh",
             "heading_error",
             "off_track",
             "distance_to_center",
@@ -55,6 +56,10 @@ class RacingWorldTest(unittest.TestCase):
             "nearest_markers",
             "car_position",
             "car_velocity",
+            "death_event",
+            "death_count",
+            "last_action",
+            "virtual_keys",
         ):
             self.assertIn(key, observation)
         for key in (
@@ -103,8 +108,13 @@ class RacingWorldTest(unittest.TestCase):
         self.assertEqual(observation["off_track_count"], 1)
         self.assertLess(observation["frame_reward"], 0.0)
 
-    def test_edge_collision_penalizes_and_keeps_car_inside(self) -> None:
+    def test_edge_collision_triggers_death_and_respawn(self) -> None:
         world = RacingWorld()
+        for marker in world.markers:
+            marker.collected = True
+        world.stats.lap_markers_collected = len(world.markers)
+        world.stats.markers_collected = len(world.markers)
+
         center = world.track.centerline[0]
         sample = world.track.sample_at(center)
         collision_radius = world.car.width * 0.55
@@ -115,16 +125,17 @@ class RacingWorldTest(unittest.TestCase):
         world.car.vy = sample.normal[1] * 90.0
 
         observation = world.step({"throttle": 0.0, "steer": 0.0, "brake": 0.0}, 1.0 / 60.0)
-        corrected = world.track.sample_at(world.car.position)
+        spawn_position, _ = world.track.spawn_pose()
 
         self.assertTrue(observation["edge_collision"])
         self.assertEqual(observation["edge_collision_count"], 1)
+        self.assertTrue(observation["death_event"])
+        self.assertEqual(observation["death_count"], 1)
         self.assertGreater(observation["last_edge_impact"], 0.0)
-        self.assertLess(observation["frame_reward"], 0.0)
-        self.assertLessEqual(
-            corrected.distance_to_center,
-            world.track.half_width - collision_radius + 0.5,
-        )
+        self.assertLessEqual(float(observation["frame_reward"]), -50.0)
+        self.assertLess(distance(world.car.position, spawn_position), 1e-6)
+        self.assertEqual(observation["markers_collected"], 0)
+        self.assertTrue(all(not marker.collected for marker in world.markers))
 
     def test_drift_score_increases_when_velocity_slips(self) -> None:
         world = RacingWorld()

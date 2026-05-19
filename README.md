@@ -1,7 +1,7 @@
 # Pyglet Racing AI Sandbox
 
-Minimal top-down racing sandbox for AI experiments. The default agent returns zero
-actions, so the car starts on the line and stays there until you connect a model.
+Top-down racing sandbox with a realism-focused RWD physics model and hybrid-action
+RL stack (PPO default, SAC optional).
 
 ## Setup
 
@@ -10,73 +10,60 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-For a quick visual movement smoke test without adding keyboard controls:
+Quick visual movement test:
 
 ```powershell
 python main.py --demo-agent
 ```
 
-Camera controls: mouse wheel zoom, `WASD` / arrow keys, edge-scroll near the
-window border, middle-mouse drag, and `Space` to snap back to the car.
+Train PPO (default):
 
-Run logic tests:
+```powershell
+python main.py --train --algo ppo --episodes 5000
+```
+
+Train SAC:
+
+```powershell
+python main.py --train --algo sac --episodes 5000
+```
+
+Play from checkpoint:
+
+```powershell
+python main.py --play ai/checkpoints/best.pt --algo ppo
+```
+
+Run tests:
 
 ```powershell
 python -m unittest discover -s tests
 ```
 
-## AI contract
+## Action Contract
 
-`RacingWorld.step(action, dt)` accepts:
+`RacingWorld.step(action, dt)` accepts a hybrid control dict:
 
 ```python
-{"throttle": 0.0, "steer": 0.0, "brake": 0.0}
+{
+  "throttle": 0.0,   # -1.0..1.0
+  "steer": 0.0,      # -1.0..1.0
+  "brake": 0.0,      # 0.0..1.0
+  "clutch": 0.0,     # 0.0..1.0 (0 engaged, 1 disengaged)
+  "handbrake": 0.0,  # 0.0..1.0
+  "gear_up": 0.0,    # 0 or 1
+  "gear_down": 0.0   # 0 or 1
+}
 ```
 
-Action ranges are:
+Agents can still provide only `throttle/steer/brake`; missing keys default to zero.
 
-- `throttle`: `-1.0..1.0`
-- `steer`: `-1.0..1.0`
-- `brake`: `0.0..1.0`
+## Observation Highlights
 
-The action format is intentionally small so different teams can plug in rule
-agents, RL policies, or imitation models without changing the simulator.
+`RacingWorld.step(...)` returns motion, track, and sensor state plus gearbox diagnostics,
+including: `rpm`, `gear`, `clutch`, `shift_attempted`, `shift_applied`, `shift_blocked`,
+`shift_block_reason`, `stall_event`, `money_shift_event`, `engine_load`, `clutch_slip`,
+`traction`, `drive_force`, and `wheel_torque`.
 
-`RacingWorld.reset()` starts a fresh episode-like run and returns the first
-observation. `RacingWorld.step(action, dt)` advances the world and returns an
-observation dictionary with:
-
-- motion state: `speed`, `forward_speed`, `lateral_speed`, `heading`,
-  `track_heading`, `heading_error`, `slip_angle`, `drift_intensity`
-- track state: `distance_to_center`, `signed_distance_to_center`,
-  `edge_clearance`, `off_track`, `progress`, `lap`
-- boundary state: `edge_collision`, `edge_collision_count`,
-  `last_edge_impact`, `off_track_count`
-- rewards and markers: `frame_reward`, `total_reward`, `marker_reward`,
-  `markers_collected`, `markers_total`, `nearest_markers`
-- sensors: `rays`, `car_position`, `car_velocity`
-
-`off_track` means the car center is outside the track width. `edge_collision`
-means the car body touched an edge; it can happen before `off_track` because
-the car has width. Edge contacts softly push the car back inside, damp outward
-velocity, and add reward penalties. Going fully off-track still reports the
-existing off-track state and penalty.
-
-Reward signals are deliberately simple:
-
-- collect marker rewards by driving through visible markers
-- earn small drift points only while on track
-- lose reward for new edge impacts, sliding along the edge, and going off track
-
-The Pyglet window also exposes `capture_frame_image()` for future pixel-based
-observations.
-
-## Next improvements
-
-Suggested follow-up work before handing this to multiple AI authors:
-
-- add explicit `done` / `done_reason` episode termination fields
-- add configurable time limits and reset options
-- add deterministic seeds for repeatable experiments
-- add a simple baseline agent for comparison
-- export per-step logs for reward, progress, collisions, and lap timing
+Camera controls: mouse wheel zoom, `WASD` / arrow keys, edge-scroll, middle-mouse drag,
+and `Space` to snap back to the car.

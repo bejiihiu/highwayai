@@ -10,7 +10,11 @@ Observation = dict[str, object]
 
 class Agent(Protocol):
     def act(self, observation: Observation) -> Mapping[str, float]:
-        """Return throttle, steer, and brake values in the -1..1 / 0..1 ranges."""
+        """Return control values for throttle/steer/brake and optional drivetrain keys.
+
+        Optional keys supported by the world are:
+        clutch, handbrake, gear_up, gear_down.
+        """
 
 
 class ZeroAgent:

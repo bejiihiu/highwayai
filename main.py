@@ -7,7 +7,7 @@ from racing_ai.world import RacingWorld
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Top-down racing sandbox for AI experiments.")
+    parser = argparse.ArgumentParser(description="Top-down racing sandbox for actor-critic AI experiments.")
     parser.add_argument(
         "--demo-agent",
         action="store_true",
@@ -16,23 +16,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--train",
         action="store_true",
-        help="Start headless DQN training.",
+        help="Start headless RL training.",
     )
     parser.add_argument(
         "--train-render",
         action="store_true",
-        help="Start DQN training with live pyglet visualization.",
+        help="Start RL training with live pyglet visualization.",
     )
     parser.add_argument(
         "--play",
         type=str,
-        help="Path to a checkpoint file to run the trained agent.",
+        help="Path to a checkpoint file to run the trained policy.",
     )
     parser.add_argument(
         "--episodes",
         type=int,
         default=5000,
         help="Number of training episodes.",
+    )
+    parser.add_argument(
+        "--algo",
+        type=str,
+        default="ppo",
+        choices=["ppo", "sac"],
+        help="RL algorithm to use (ppo or sac).",
     )
     parser.add_argument(
         "--device",
@@ -44,39 +51,59 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _infer_algorithm_from_checkpoint(path: str, fallback: str) -> str:
+    try:
+        import torch
+
+        checkpoint = torch.load(path, map_location="cpu")
+    except Exception:
+        return fallback
+
+    algo = str(checkpoint.get("algorithm", fallback)).lower()
+    if algo in {"ppo", "sac"}:
+        return algo
+    return fallback
+
+
 def main() -> None:
     args = parse_args()
 
-    # Training modes bypass the normal run loop
     if args.train or args.train_render:
         try:
+            from ai.config import RLConfig
             from ai.trainer import train
-            from ai.config import DQNConfig
         except ModuleNotFoundError as exc:
             raise SystemExit("Missing dependency for training. Run: python -m pip install -r requirements.txt") from exc
-        
-        config = DQNConfig()
-        train(config, episodes=args.episodes, device=args.device, render=args.train_render)
+
+        config = RLConfig()
+        train(config, episodes=args.episodes, device=args.device, render=args.train_render, algo=args.algo)
         return
 
-    # Play mode
     if args.play:
         try:
-            from ai.dqn_agent import DQNAgent
-            from ai.config import DQNConfig
+            from ai.config import RLConfig
+            from ai.ppo_agent import PPOAgent
+            from ai.sac_agent import SACAgent
         except ModuleNotFoundError as exc:
             raise SystemExit("Missing dependency for playing. Run: python -m pip install -r requirements.txt") from exc
-        
-        config = DQNConfig()
-        agent = DQNAgent(config, device=args.device)
+
+        config = RLConfig()
+        algo = _infer_algorithm_from_checkpoint(args.play, args.algo)
+        if algo != args.algo:
+            print(f"Checkpoint metadata detected algorithm={algo}; overriding --algo {args.algo}.")
+
+        if algo == "sac":
+            agent = SACAgent(config, device=args.device)
+        else:
+            agent = PPOAgent(config, device=args.device)
+
         try:
             agent.load(args.play)
             agent.train_mode(False)
-            print(f"Loaded checkpoint from {args.play}")
+            print(f"Loaded {algo.upper()} checkpoint from {args.play}")
         except FileNotFoundError:
             raise SystemExit(f"Checkpoint not found: {args.play}")
     else:
-        # Default agents
         agent = ScriptedDemoAgent() if args.demo_agent else ZeroAgent()
 
     world = RacingWorld(agent=agent)
